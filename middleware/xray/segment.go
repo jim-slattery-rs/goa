@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -65,7 +66,7 @@ type (
 		// segment.
 		Parent *Segment `json:"-"`
 		// conn is the UDP client to the X-Ray daemon.
-		conn net.Conn
+		conn io.Writer
 		// submittedInProgressSegment indicates if we have already sent
 		// an "in-progress" copy of this segment to the X-Ray daemon.
 		submittedInProgressSegment bool
@@ -148,7 +149,7 @@ type (
 
 // NewSegment creates a new segment that gets written to the given connection
 // on close.
-func NewSegment(name, traceID, spanID string, conn net.Conn) *Segment {
+func NewSegment(name, traceID, spanID string, conn io.Writer) *Segment {
 	return &Segment{
 		Mutex:      &sync.Mutex{},
 		Name:       name,

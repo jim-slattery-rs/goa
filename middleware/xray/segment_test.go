@@ -2,16 +2,24 @@ package xray
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/goadesign/goa"
+	. "github.com/onsi/gomega"
 	"github.com/pkg/errors"
 )
 
@@ -325,4 +333,81 @@ func TestRace(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+// WriterCounter wraps an io.Writer and counts how many bytes are written.
+// Adapted from: https://github.com/miolini/datacounter/blob/master/reader.go
+type WriterCounter struct {
+	byteCount uint64
+	writer    io.Writer
+}
+
+var _ io.Writer = (*WriterCounter)(nil)
+
+// NewWriterCounter creates a new WriterCounter.
+func NewWriterCounter(w io.Writer) *WriterCounter {
+	return &WriterCounter{
+		writer: w,
+	}
+}
+
+// Write calls through to the wrapped writer, and increments the byteCount of how many bytes are written.
+func (counter *WriterCounter) Write(buf []byte) (int, error) {
+	n, err := counter.writer.Write(buf)
+	atomic.AddUint64(&counter.byteCount, uint64(n))
+	return n, err
+}
+
+// ByteCount returns number of bytes written.
+func (counter *WriterCounter) ByteCount() uint64 {
+	return atomic.LoadUint64(&counter.byteCount)
+}
+
+func Test_TraceLimits(t *testing.T) {
+	RegisterTestingT(t)
+
+	conn, err := net.Dial("udp", "127.0.0.1:2000")
+	Expect(err).ToNot(HaveOccurred())
+
+	writeCounter := NewWriterCounter(conn)
+	s := NewSegment("jim-test", NewTraceID(), NewID(), io.MultiWriter(writeCounter, os.Stdout))
+	s.Namespace = "jim-" + t.Name()
+	s.HTTP = &HTTP{Request: &Request{Method: "GET", URL: "http://example.com/jim/" + t.Name()}}
+	fmt.Println("https://console.aws.amazon.com/xray/home?region=us-east-1#/traces/" + s.TraceID)
+	//fmt.Println(prettyJson(s))
+
+	s.SubmitInProgress()
+
+	const (
+		subsegmentsToSend  = 528
+		subsegmentDuration = 240 * time.Millisecond
+		subsegmentOffset   = 120 * time.Millisecond
+	)
+	var wg sync.WaitGroup
+	for i := 0; i < subsegmentsToSend; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+
+			sub := s.NewSubsegment("Subsegment_" + strconv.Itoa(i))
+			sub.HTTP = &HTTP{Request: &Request{Method: "GET", URL: "http://example.com/jim/" + sub.Name}}
+			sub.SubmitInProgress()
+			time.Sleep(subsegmentDuration)
+			sub.Close()
+		}(i + 1)
+		time.Sleep(subsegmentOffset)
+	}
+	wg.Wait()
+
+	s.Close()
+
+	fmt.Println()
+	fmt.Println("Wrote bytes:", writeCounter.ByteCount())
+	fmt.Println("https://console.aws.amazon.com/xray/home?region=us-east-1#/traces/" + s.TraceID)
+}
+
+func prettyJson(o interface{}) string {
+	bs, err := json.MarshalIndent(o, "", "  ")
+	Expect(err).ToNot(HaveOccurred())
+	return string(bs)
 }
